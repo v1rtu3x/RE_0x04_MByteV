@@ -1,5 +1,4 @@
 // src/mbytev.c
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,36 +8,41 @@
 #define MAX_CODE   4096
 #define FLAG_XOR_KEY 0xC7
 
-static const uint8_t FLAG[] = {
-    0x83, 0x8a, 0x8e, 0xbc, 0xb0, 0xaf, 0xf3, 
-    0xb3, 0x98, 0xf3, 0x98, 0xb0, 0xf4, 0xf6, 
-    0xb5, 0xa3, 0x98, 0xb1, 0xaa, 0xba
+// Encrypted flag bytes (XOR-packed). Decrypts into dec_flag at runtime.
+static const uint8_t ENC_FLAG[] = {
+    0xa2, 0xab, 0xaf, 0x9d, 0x91, 0x8e, 
+    0xd2, 0x92, 0xb9, 0xd2, 0xb9, 0x91, 
+    0xd5, 0xd7, 0x94, 0x82, 0xb9, 0x90, 
+    0x8b, 0x9b
 };
-static const size_t FLAG_LEN = sizeof(FLAG) / sizeof(FLAG[0]);
-static char dec_flag[256]; 
-static int  flag_unlocked = 0;
+static const size_t ENC_FLAG_LEN = sizeof(ENC_FLAG);
+
+static char dec_flag[256];     // decrypted flag (NUL-terminated)
+static int  flag_unlocked = 0; // set after a proper CALL
+
+// Embedded (XOR-packed) default bytecode program (placeholder)
 static const uint8_t packed_code[] = {
     0x00
 };
-static const size_t packed_len = sizeof(packed_code) / sizeof(packed_code[0]);
+static const size_t packed_len = sizeof(packed_code);
 
 static uint8_t compute_xor_key(void) {
     uint8_t a = 0x12;
     uint8_t b = 0xB5;
-    return (uint8_t)(((a ^ b) + 0x11) & 0xFF); 
+    return (uint8_t)(((a ^ b) + 0x11) & 0xFF);
 }
 
-static void decrypt_flag_if_allowed(int8_t regs[4], uint8_t selector){
-    if(flag_unlocked) return;
-    if((uint8_t)regs[0 != 0x7A]) return;
-    if (selector != 0x42) return;
+static void decrypt_flag_if_allowed(int8_t regs[4], uint8_t selector) {
+    if (flag_unlocked) return;
+    if ((uint8_t)regs[0] != 0x7A) return;   // R0 must equal 0x7A
+    if (selector != 0x42) return;           // selector must equal 0x42
 
-    uint8_t derived = (uint8_t)((regs[0] ^ regs [1] ^0xA5) + selector);
+    uint8_t derived = (uint8_t)(((uint8_t)regs[0] ^ (uint8_t)regs[1] ^ 0xA5) + selector);
     uint8_t final_k = (uint8_t)(derived ^ FLAG_XOR_KEY);
 
-    size_t n = (FLAG_LEN < (sizeof(dec_flag) - 1)) ? FLAG_LEN : (sizeof(dec_flag) - 1);
-    for (size_t i = 0; i < n; i++ ){
-        dec_flag[i] = (char)(FLAG[i] ^ final_k);
+    size_t n = (ENC_FLAG_LEN < (sizeof(dec_flag) - 1)) ? ENC_FLAG_LEN : (sizeof(dec_flag) - 1);
+    for (size_t i = 0; i < n; ++i) {
+        dec_flag[i] = (char)(ENC_FLAG[i] ^ final_k);
     }
     dec_flag[n] = '\0';
     flag_unlocked = 1;
@@ -69,7 +73,8 @@ int main(int argc, char **argv) {
     uint8_t code[MAX_CODE];
     size_t  code_len = 0;
 
-        if (argc >= 2) {
+    // Try external bytecode file first
+    if (argc >= 2) {
         const char *path = argv[1];
         FILE *f = fopen(path, "rb");
         if (f) {
@@ -83,6 +88,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Fallback to embedded packed program
     if (code_len == 0) {
         if (packed_len > MAX_CODE) {
             fprintf(stderr, "Packed program too large\n");
@@ -95,10 +101,11 @@ int main(int argc, char **argv) {
         code_len = packed_len;
     }
 
-    size_t ip = 0;                
+    // VM state
+    size_t ip = 0;
     int8_t regs[4] = {0, 0, 0, 0};
     int16_t stack[STACK_SIZE];
-    int sp = 0;                   
+    int sp = 0;
     int zflag = 0;
 
     while (ip < code_len) {
@@ -152,9 +159,8 @@ int main(int argc, char **argv) {
             }
 
             case OP_CMP_REG_IMM: {
-                if (ip + 1 > code_len) { puts("Truncated CMP"); return 1; }
+                if (ip + 2 > code_len) { puts("Truncated CMP"); return 1; }
                 int reg = (int)(code[ip++] & 0x03);
-                if (ip >= code_len) { puts("Truncated CMP"); return 1; }
                 int8_t imm = (int8_t)code[ip++];
                 zflag = (regs[reg] == imm);
                 break;
@@ -180,22 +186,22 @@ int main(int argc, char **argv) {
                 break;
             }
 
-            case OP_CALL:{
-                if (ip >= code_len){puts("Truncated CALL"); return 1;}
+            case OP_CALL: {
+                if (ip >= code_len) { puts("Truncated CALL"); return 1; }
                 uint8_t selector = code[ip++];
-                decrypt_flag_if_allowed (regs, selector);
+                decrypt_flag_if_allowed(regs, selector);
                 break;
             }
 
             case OP_HALT: {
-                const int SECRET = 0x7A;
                 if (flag_unlocked) {
-                    printf("SUCCESS: FLAG{%s}\n", FLAG);
+                    printf("SUCCESS: FLAG{%s}\n", dec_flag);
                 } else {
                     puts("FAIL");
                 }
                 return 0;
             }
+
 
             default:
                 puts("Bad opcode");
